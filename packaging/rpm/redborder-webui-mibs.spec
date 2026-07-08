@@ -9,7 +9,6 @@ License: MIT
 URL:     https://github.com/redBorder/redborder-webui-mibs/
 Source0: %{name}-%{version}.tar.gz
 
-# Eliminamos las dependencias de node, npm, wget, etc.
 Requires: bash libsmi
 AutoReqProv: no
 
@@ -21,23 +20,22 @@ and installs them into the system MIBs directory.
 %setup -qn %{name}-%{version}
 
 %build
-# No se requiere compilar nada ya que los MIBs son archivos de texto plano
+# No compilation is required
 
 %install
-# 1. Crear el directorio de destino en el buildroot (Path estándar para MIBs personalizados)
-mkdir -p %{buildroot}/usr/share/mibs/site
+# Create the destination directory in the buildroot (Standard path for custom MIBs)
+mkdir -p %{buildroot}/usr/share/mibs/webui
 
-# 2. Copiar todo el contenido de tu carpeta 'resources/mibs/' al destino
-# Asumiendo que en tu repositorio los mibs están en resources/mibs/
-cp -r resources/mibs/* %{buildroot}/usr/share/mibs/site/
+# Copy the entire contents of your ‘resources/mibs/’ folder to the destination
+cp -r resources/mibs/* %{buildroot}/usr/share/mibs/webui/
 
 %clean
 rm -rf %{buildroot}
 
 %files
-# Definimos los permisos por defecto para los archivos MIB (lectura para todos, ejecución no requerida)
+# We set the default permissions for MIB files (read access for everyone, execute not required)
 %defattr(0644,root,root,0755)
-/usr/share/mibs/site/
+/usr/share/mibs/webui/
 
 %changelog
 * Wed Jul 08 2026 Vicnete Mesa <vimesa@redborder.com>
