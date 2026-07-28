@@ -1,0 +1,54 @@
+#!/usr/bin/env perl
+# translateleaf leafname [vendor] - run snmptranslate on MIBs and show output
+# no vendor param will load all MIBs.
+
+use strict;
+use warnings;
+
+use charnames ':full';
+binmode STDOUT, ':utf8';
+$|++;
+
+use Time::HiRes 'sleep';
+use File::Spec::Functions qw(splitdir catfile catdir);
+use Term::ANSIColor qw(:constants);
+use POSIX qw(:sys_wait_h);
+
+use FindBin;
+use lib catfile($FindBin::Bin, 'lib');
+use Helpers;
+
+# TODO: arguably rfc:net-snmp should be enough!
+# but it seems cisco, nortel, etc are required. maybe in the future, fix this.
+my @mibdirs = grep { -d and $_ !~ m#/EXTRAS$# } glob( catdir($ENV{MIBHOME},'*') );
+$ENV{MIBDIRS} = join ':', @mibdirs;
+
+# index the MIBs in MIBHOME
+print "\N{EYES} Building MIBs index\n";
+my ($mib_for_file, $mib_files, $vendor_mibs, $mib_vendors) = mkindex();
+
+my $oid = $ARGV[0];
+die "error: oid arg is required" unless $oid;
+
+my $vendor = $ARGV[1];
+if ($vendor and !exists $vendor_mibs->{$vendor}) {
+  print "error: vendor arg must exist in MIBHOME\n";
+  exit(1);
+}
+$vendor ||= 'all';
+
+my $mibs = ($vendor eq 'all') ? 'ALL' : (join ':', @{$vendor_mibs->{$vendor}});
+print CYAN, "\N{ALMOST EQUAL TO} translating for '$vendor'", CLEAR "\n";
+
+defined(my $pid = fork) or die "Couldn't fork: $!";
+if (!$pid) { # Child
+  exec(qq{snmptranslate -IR -Le -m '$mibs' $oid})
+    or die "Couldn't exec: $!";
+} else { # Parent
+  while (! waitpid($pid, WNOHANG)) {
+    sleep 0.05;
+  }
+}
+
+print GREEN, "\N{BLACK FLAG} Translate done.", CLEAR, "\n";
+exit(0);

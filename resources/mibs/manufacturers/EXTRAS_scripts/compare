@@ -1,0 +1,58 @@
+#!/usr/bin/env perl
+# compare new_mib_file
+# will run a diff against the version of the same MIB in netdisco-mibs
+
+use strict;
+use warnings;
+
+use File::Spec::Functions qw(catfile);
+
+use FindBin;
+use lib catfile($FindBin::Bin, 'lib');
+use Helpers;
+
+my $newmib = shift;
+if (!defined $newmib or not -f $newmib) {
+  print "usage: $0 new_mib_file\n";
+  exit(1);
+}
+
+# make an index so we know what's in the file
+my ($file_for, $errors) = build_index($newmib);
+exit(1) if $errors;
+
+my $mib = (keys %$file_for)[0];
+#use DDP; p $file_for;
+
+unless (scalar keys %$file_for) {
+  print "error: unable to parse MIB DEFINITIONS in $newmib\n";
+  exit(1);
+}
+
+print "\N{ALMOST EQUAL TO} diff netdisco-mibs \N{RIGHTWARDS WHITE ARROW FROM WALL} $mib\n";
+
+print "\N{EYES} Scanning for matching MIBs\n";
+my ($mib_for_file, $mib_files, $vendor_mibs, $mib_vendors) = mkindex();
+
+unless (exists $mib_files->{$mib}) {
+  print "error: MIB $mib is unknown to netdisco-mibs\n";
+  exit(1);
+}
+
+# find a candidate file to compare, or abort
+if (scalar @{ $mib_vendors->{$mib} } > 1) {
+    print "error: multiple candidate vendors to compare:\n";
+    print join "\n", @{ $mib_vendors->{$mib} }, '';
+    exit(1);
+}
+
+# run a diff
+my $oldmib = catfile($ENV{MIBHOME}, $mib_files->{$mib}->[0]);
+my $diff = qx(diff -q -b -B -w '$oldmib' '$newmib' 2>/dev/null);
+if ($diff =~ m/^\s*$/) {
+  print "\N{BLACK FLAG} MIB files are the same.\n";
+  exit(0);
+}
+# else they are not
+exec(qq{diff -b -B -w --strip-trailing-cr '$oldmib' '$newmib' | less});
+
