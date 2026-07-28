@@ -1,0 +1,76 @@
+#!/usr/bin/env perl
+# genxlate [vendor|*] - run snmptranslate on MIBs and save output
+# no param will make a single report for all MIBs and one for each vendor
+
+use strict;
+use warnings;
+
+use charnames ':full';
+binmode STDOUT, ':utf8';
+$|++;
+
+use Time::HiRes 'sleep';
+use File::Temp;
+use File::Spec::Functions qw(splitdir catfile catdir);
+use Term::ANSIColor qw(:constants);
+use POSIX qw(:sys_wait_h);
+
+use FindBin;
+use lib catfile($FindBin::Bin, 'lib');
+use Helpers;
+
+# TODO: arguably rfc:net-snmp should be enough!
+# but it seems cisco, nortel, etc are required. maybe in the future, fix this.
+my @mibdirs = grep { -d and $_ !~ m#/EXTRAS$# } glob( catdir($ENV{MIBHOME},'*') );
+$ENV{MIBDIRS} = join ':', @mibdirs;
+
+# index the MIBs in MIBHOME
+print "\N{EYES} Building MIBs index\n";
+my ($mib_for_file, $mib_files, $vendor_mibs, $mib_vendors) = mkindex();
+
+my $vendor = shift;
+if ($vendor and !exists $vendor_mibs->{$vendor} and $vendor ne '*') {
+  print "error: vendor arg must exist in MIBHOME\n";
+  exit(1);
+}
+my @vendors = (defined $vendor)
+  ? (($vendor eq '*') ? (sort keys %{$vendor_mibs}) : ($vendor))
+  : ((sort keys %{$vendor_mibs}), 'all');
+
+my $errors = 0;
+print "\N{EYES} Translating MIBs\n";
+foreach my $v (@vendors) {
+  next if $errors and $v eq 'all';
+  my $mibs = ($v eq 'all') ? 'ALL' : (join ':', @{$vendor_mibs->{$v}});
+
+  my $out = catfile($ENV{MIBHOME}, 'EXTRAS', 'reports', $v);
+  my $err = File::Temp->new();
+  status("Parsing $v");
+
+  defined(my $pid = fork) or die "Couldn't fork: $!";
+  if (!$pid) { # Child
+    exec(qq{snmptranslate -Tt -Le -m '$mibs' 2>'$err' | perl -p -e 's/ tc=[0-9]+//g; s/anonymous#[0-9]*/anonymous/' 1>'$out'})
+      or die "Couldn't exec: $!";
+  } else { # Parent
+    my $slept = 0.5;
+    while (! waitpid($pid, WNOHANG)) {
+      status("Parsing $v");
+      sleep 0.05;
+      $slept -= 0.05;
+    }
+    sleep $slept if $slept > 0;
+  }
+
+  if (-s $err) {
+    blank();
+    ++$errors;
+    print RED, "\N{HEAVY BALLOT X} ", CYAN, 'Errors from ',
+      MAGENTA, $v, CYAN, " MIBs\n", RESET;
+    while (<$err>) { print }
+    print "\n";
+  }
+}
+
+blank();
+print "\N{BLACK FLAG} Reports complete.\n";
+exit(0);
