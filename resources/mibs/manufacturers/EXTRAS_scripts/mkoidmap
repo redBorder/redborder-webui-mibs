@@ -1,0 +1,188 @@
+#!/usr/bin/env perl
+# mkoidmap [vendor|MIB] - run snmptranslate per MIB and save output
+# no param will parse every MIB in every vendor (slooooooow.....)
+
+use strict;
+use warnings;
+
+use charnames ':full';
+binmode STDOUT, ':utf8';
+$|++;
+
+use Time::HiRes 'sleep';
+use File::Temp;
+use File::Slurper qw(read_lines write_text);
+use File::Spec::Functions qw(splitdir catfile catdir);
+use Term::ANSIColor qw(:constants);
+use POSIX qw(:sys_wait_h);
+
+use FindBin;
+use lib catfile($FindBin::Bin, 'lib');
+use Helpers;
+
+# TODO: arguably rfc:net-snmp should be enough!
+# but it seems cisco, nortel, etc are required. maybe in the future, fix this.
+my @mibdirs = grep { -d and $_ !~ m#/EXTRAS$# } glob( catdir($ENV{MIBHOME},'*') );
+$ENV{MIBDIRS} = join ':', @mibdirs;
+
+# index the MIBs in MIBHOME
+print "\N{EYES} Building MIBs index\n";
+my ($mib_for_file, $mib_files, $vendor_mibs, $mib_vendors) = mkindex();
+
+my $arg = shift;
+if ($arg and (!exists $vendor_mibs->{$arg} and !exists $mib_files->{$arg})) {
+  print "error: arg must be vendor or MIB\n";
+  exit(1);
+}
+
+my $mibcount = 0;
+my %oidcount = ();
+my %target_mibs = ();
+
+if ($arg and exists $vendor_mibs->{$arg}) {
+  $target_mibs{$arg} = [sort @{ $vendor_mibs->{$arg} }];
+}
+elsif ($arg and exists $mib_files->{$arg}) {
+  $target_mibs{$arg} = [$arg];
+}
+else {
+  %target_mibs = map {$_ => [sort @{ $vendor_mibs->{$_} }]} keys %{$vendor_mibs};
+}
+
+foreach my $target (reverse sort keys %target_mibs) {
+  my %oidmap = parse_mibs($target, @{ $target_mibs{$target} });
+  $mibcount += scalar @{ $target_mibs{$target} };
+  ++$oidcount{$_} for keys %oidmap;
+
+  my $report = catfile($ENV{MIBHOME}, 'EXTRAS', 'reports', "${target}_oids");
+  write_text($report, join '', map {"$_,$oidmap{$_}\n"}
+                               sort {lxoid($a) cmp lxoid($b)}
+                               grep {m/^\.1/} keys %oidmap);
+}
+
+blank();
+print sprintf "\N{BLACK FLAG} %d mibs translated into %d objects.\n", $mibcount, scalar keys %oidcount;
+exit(0);
+
+sub parse_mibs {
+  my ($target, @mibs) = @_;
+  my %oidmap = ();
+
+  blank();
+  print "\N{EYES} Translating $target MIB(s)\n";
+
+  MIB: foreach my $m (@mibs) {
+    my $out = File::Temp->new();
+    my $err = File::Temp->new();
+    status("Parsing $m");
+
+    defined(my $pid = fork) or die "Couldn't fork: $!";
+    if (!$pid) { # Child
+      exec(qq{snmptranslate -m '$m' -On -Td -TB '.1*' 2>'$err' 1>'$out'})
+        or die "Couldn't exec: $!";
+    } else { # Parent
+      my $slept = 0.5;
+      while (! waitpid($pid, WNOHANG)) {
+        status("Parsing $m");
+        sleep 0.05;
+        $slept -= 0.05;
+      }
+      sleep $slept if $slept > 0;
+    }
+
+    if (-s $err) {
+      blank();
+      print RED, "\N{HEAVY BALLOT X} ", CYAN, 'Errors from ',
+        MAGENTA, $m, CYAN, " MIBs\n", RESET;
+      while (<$err>) { print }
+      print "\n";
+      next MIB;
+    }
+
+    my @report = read_lines($out, 'latin-1');
+    my %details = ();
+    my $descr_on = 0;
+
+    LINEOUT: foreach my $line (@report) {
+      if ($line =~ m/^::=/) { # end of details
+          $oidmap{$details{oid}} ||= join ',',
+            ($details{mib} .'::'. $details{leaf}),
+            map {$details{$_} || ''} (qw/type mode index status syntax descr/);
+          %details = ();
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\.\d/) { # oid
+          $details{oid} = $line;
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^(\S+)\s/ and not $descr_on) { # leaf name
+          $details{leaf} = $1;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\s+-- FROM\s+([-#\w]+)/) {
+          $details{mib} = $1;
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\s+MAX-ACCESS\s+([-\w]+)/) {
+          $details{mode} = $1;
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\s+INDEX\s+{([^}]+)}/) {
+          $details{index} = join ':',
+                                   map {s/\s+//g; $_}
+                                   split m/,/, $1;
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\s+STATUS\s+([-\w]+)/) {
+          $details{status} = $1;
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\s+SYNTAX\s+([-\w]+)(?:\s+(.+))?/) {
+          $details{type} = $1;
+          my $syntax = $2;
+          next LINEOUT unless $syntax and $syntax =~ m/{/;
+          $details{syntax} = join ':',
+                                    map {s/\s+//g; $_}
+                                    map {s/[{}]//g; $_}
+                                    split m/,/, $syntax;
+          $descr_on = 0;
+          next LINEOUT;
+      }
+
+      if ($line =~ m/^\s+DESCRIPTION/ or $descr_on) {
+          $details{descr} .= join '',
+                                  map {s/\s+/ /g; $_}
+                                  map {s/"//g; $_}
+                                  map {s/^\s+DESCRIPTION\s+//; $_} ($line);
+          $descr_on = 1;
+          next LINEOUT;
+      }
+    }
+  }
+
+  delete $oidmap{'.1'};
+  return %oidmap;
+}
+
+# take oid and make comparable
+sub lxoid {
+  my ($oid, $seglen) = @_;
+  $seglen ||= 6;
+  return $oid if $oid !~ m/^[0-9.]+$/;
+  $oid =~ s/^(\.)//; my $leading = $1;
+  $oid = join '.', map { sprintf("\%0${seglen}d", $_) } (split m/\./, $oid);
+  return (($leading || '') . $oid);
+}
